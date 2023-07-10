@@ -1,0 +1,125 @@
+#!/bin/sh
+
+PATH=/usr/bin:/bin
+export PATH
+
+#
+# FUNCTIONS
+#
+getcreds () {
+    /bin/awk >/dev/null 2>&1 '
+        BEGIN {
+            cmd_cred = sprintf("/bin/zenity --forms ")
+            if (system("/bin/klist -s") == 0) {
+                cmd = sprintf("/bin/klist\n")
+                while (cmd | getline > 0) {
+                    if ($0 ~ /^Default principal:/) {
+                        split($0, a, /:[[:space:]]+/)
+                        principal = a[2]
+
+                        break
+                    } 
+                }
+                close(cmd)
+
+                cmd_cred = sprintf("%s --text=\"Enter password for %s\" --add-password=\"Password\"\n", cmd_cred, principal)
+                cmd_cred | getline password
+                close(cmd_cred)
+            } else {
+                cmd_cred = sprintf("%s --text=\"Enter Kerberos identity\" --add-entry=\"Principal\" --add-password=\"Password\"\n", cmd_cred)
+                cmd_cred | getline
+
+                if (split($0, a, "|") == 2) {
+                    principal = a[1]
+                    password = a[2]
+                }
+                close(cmd_cred)
+            }
+
+            exit(0)
+        }
+
+        END {
+            if (length(principal) > 0 && length(password) > 0) {
+                cmd = sprintf("/bin/ktutil\n")
+                
+                printf("add_entry -password -p %s -k 1 -f\n", principal) | cmd
+                printf("%s\n", password) | cmd
+                printf("write_kt %s/krb5.keytab\n", ENVIRON["XDG_RUNTIME_DIR"]) | cmd
+                printf("quit\n") | cmd
+
+                close(cmd)
+            } else {
+                exit(1)
+            }
+        }
+    '
+}
+
+#
+# MAIN
+#
+# shellcheck disable=SC2089,SC2016
+AWK='function expand (s) {
+    if (s ~ /^includedir/) {
+        split(s, a)
+        
+        cmd = sprintf("/bin/find %s -type f", a[2])
+        while (cmd | getline ifile > 0)
+            system(sprintf("/bin/awk -e \047%s\047 %s\n", script, ifile))
+    } else
+        print
+
+    close(cmd)
+}
+
+BEGIN {
+    script = ENVIRON["AWK"]
+    file = PROCINFO["argv"][3]
+
+    printf("##include %s\n", file)
+}
+
+{
+    expand($0)
+}'
+# shellcheck disable=SC2090
+export AWK
+
+if [ -f "/etc/krb5.conf" ]; then
+    if [ ! -s "$XDG_RUNTIME_DIR/krb5.conf" ]; then
+        awk -e "$AWK" /etc/krb5.conf >"$XDG_RUNTIME_DIR/krb5.conf"
+    fi
+else
+    zenity --error --text "Kerberos configuration file \"/etc/rkb5.conf\" not found"
+
+    exit 1
+fi
+
+if [ ! -s "$XDG_RUNTIME_DIR/krb5.keytab" ]; then
+    getcreds
+
+    # shellcheck disable=SC2181
+    if [ $? -ne 0 ]; then
+        zenity --error --text "Insufficient credentials entered"
+
+        exit 2
+    elif [ ! -s "$XDG_RUNTIME_DIR/krb5.keytab" ]; then
+        zenity --error --text "Invalid credentials entered"
+
+        exit 3
+    fi
+fi
+
+# shellcheck disable=SC3028
+flatpak run \
+    --branch="stable" \
+    --arch="x86_64" \
+    --env="KRB5_CONFIG=/run/user/${UID}/krb5.conf" \
+    --env="KRB5_CLIENT_KTNAME=/run/user/${UID}/krb5.keytab" \
+    --env="KRB5CCNAME=FILE:/tmp/krb5cc_${UID}" \
+    --filesystem="xdg-run/krb5.conf" \
+    --filesystem="xdg-run/krb5.keytab" \
+    --filesystem="/var/lib/mysql/mysql.sock" \
+    --user \
+    --command="/app/dbeaver/dbeaver" io.dbeaver.DBeaverCommunity
